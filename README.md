@@ -43,59 +43,74 @@ Required packages:
 
 ## Quick Start
 
-### 1. Initial Setup
+### For Your Situation (Access 16.0 installed, old MDB files)
 
-Run the interactive configuration setup:
+Since you have Microsoft Access 16.0 installed, use the **COM automation converter** which is perfect for old MDB files:
 
 ```bash
+# Direct conversion using your installed Access
+python access_com_converter.py "C:\path\to\your\mdb\files" --user your_mysql_user --password your_mysql_password
+
+# Example:
+python access_com_converter.py "C:\databases" --user root --password mypassword --host localhost
+```
+
+### Alternative Methods
+
+#### **Option 1: ODBC Method (requires driver installation)**
+
+#### **Option 1: ODBC Method (requires driver installation)**
+
+First install Microsoft Access Database Engine, then:
+
+```bash
+# Install dependencies
+install.bat
+
+# Configure settings
 python config_setup.py setup
+
+# Run conversion
+run_conversion.bat
 ```
 
-This will guide you through:
-- Source directory configuration
-- MySQL connection settings
-- Output directory setup
-- Advanced options
+#### **Option 2: Manual CSV Export**
 
-### 2. Test Connections
-
-Verify your configuration:
+If automation fails:
 
 ```bash
-python config_setup.py test
+# 1. Export tables from Access to CSV manually
+# 2. Use CSV converter
+python csv_to_mysql_converter.py "C:\path\to\csv\files" --user root --password mypass
 ```
 
-### 3. Run Conversion
+## Detailed Usage
 
-Using saved configuration:
+### Using COM Automation (Recommended for your setup)
+
+### Using COM Automation (Recommended for your setup)
+
+The COM automation method uses your installed Microsoft Access to export tables and convert them to MySQL. This is the most reliable method for old MDB files.
 
 ```bash
-python run_converter.py
+# Basic usage - convert all MDB/ACCDB files in a directory
+python access_com_converter.py "C:\path\to\databases" --user root --password secret
+
+# With custom MySQL server
+python access_com_converter.py "C:\databases" --host 192.168.1.100 --user dbuser --password dbpass
+
+# With custom log directory
+python access_com_converter.py "C:\databases" --user root --password secret --log-dir "C:\conversion_logs"
 ```
 
-Or with command-line arguments:
+**Advantages of COM method:**
+- ✅ Works with ANY Access database version (including very old MDB files)
+- ✅ No ODBC driver installation required
+- ✅ Handles complex Access features better
+- ✅ More reliable for old/corrupted databases
+- ✅ Uses your existing Access installation
 
-```bash
-python access_to_mysql_converter.py "C:\path\to\access\databases" --user myuser --password mypass --host localhost
-```
-
-## Usage Examples
-
-### Basic Usage
-
-```bash
-# For modern Access databases (.accdb)
-python access_to_mysql_converter.py "C:\databases" --user root --password secret
-
-# For OLD .MDB files (like yours)
-python legacy_mdb_converter.py "C:\databases" --user root --password secret
-
-# Specify custom MySQL host and port
-python access_to_mysql_converter.py "C:\databases" --host 192.168.1.100 --port 3306 --user dbuser --password dbpass
-
-# Custom log directory
-python access_to_mysql_converter.py "C:\databases" --user root --password secret --log-dir "C:\conversion_logs"
-```
+### Using ODBC Method
 
 ### Using Configuration File
 
@@ -114,17 +129,21 @@ python run_converter.py --config my_config.json
 
 ```
 msaccess-script/
-├── access_to_mysql_converter.py    # Main conversion engine
+├── access_com_converter.py         # COM automation converter (RECOMMENDED for your setup)
+├── access_to_mysql_converter.py    # Main ODBC-based conversion engine
+├── legacy_mdb_converter.py         # Multi-method converter for old MDB files
+├── csv_to_mysql_converter.py       # Manual CSV import tool
 ├── config_setup.py                 # Interactive configuration setup
 ├── run_converter.py                # Convenient runner script
 ├── diagnose_odbc.py                # ODBC diagnostics and troubleshooting
 ├── fix_odbc_drivers.bat            # Windows ODBC driver fix script
+├── example_usage.py                # Sample programmatic usage
 ├── requirements.txt                # Python dependencies
 ├── README.md                       # This file
 ├── install.bat                     # Windows installation script
 ├── run_conversion.bat              # Windows quick start script
-├── example_usage.py                # Sample programmatic usage
 ├── logs/                           # Generated log files
+│   ├── access_com_converter_YYYYMMDD_HHMMSS.log
 │   ├── access_to_mysql_YYYYMMDD_HHMMSS.log
 │   └── conversion_report_YYYYMMDD_HHMMSS.json
 └── converter_config.json          # Saved configuration (generated)

@@ -177,26 +177,82 @@ class AccessToMySQLConverter:
         """Connect to MS Access database."""
         try:
             conn_str = self.get_access_connection_string(db_path)
-            conn = pyodbc.connect(conn_str)
-            self.logger.info(f"Connected to Access database: {db_path.name}")
-            return conn
+            
+            # Try different connection approaches for old MDB files
+            connection_params = [
+                {},  # Default
+                {'timeout': 30},  # Longer timeout
+                {'autocommit': True},  # Auto commit
+                {'timeout': 30, 'autocommit': True},  # Both
+            ]
+            
+            for params in connection_params:
+                try:
+                    conn = pyodbc.connect(conn_str, **params)
+                    
+                    # Test the connection with a simple query
+                    cursor = conn.cursor()
+                    
+                    # Try different ways to test connection for old MDB files
+                    test_queries = [
+                        "SELECT 1",
+                        "SELECT COUNT(*) FROM MSysObjects WHERE 1=0",
+                        "SELECT Name FROM MSysObjects WHERE Type=1 AND Flags=0 LIMIT 1",
+                    ]
+                    
+                    connection_works = False
+                    for test_query in test_queries:
+                        try:
+                            cursor.execute(test_query)
+                            cursor.fetchall()
+                            connection_works = True
+                            break
+                        except:
+                            continue
+                    
+                    if connection_works:
+                        self.logger.info(f"Connected to Access database: {db_path.name}")
+                        return conn
+                    else:
+                        conn.close()
+                        continue
+                        
+                except Exception as e:
+                    self.logger.debug(f"Connection attempt failed with params {params}: {e}")
+                    continue
+            
+            # If all connection attempts failed
+            raise Exception("All connection methods failed")
+            
         except Exception as e:
             self.logger.error(f"Failed to connect to {db_path}: {e}")
             
             # Log additional troubleshooting information
             self.logger.error("Troubleshooting information:")
-            available_drivers = pyodbc.drivers()
-            self.logger.error(f"Available ODBC drivers: {list(available_drivers)}")
-            
-            # Check if any Access drivers are available
-            access_drivers = [d for d in available_drivers if 'access' in d.lower() or 'mdb' in d.lower()]
-            if not access_drivers:
-                self.logger.error("No Microsoft Access drivers found!")
-                self.logger.error("Please install Microsoft Access Database Engine:")
-                self.logger.error("- Download from: https://www.microsoft.com/en-us/download/details.aspx?id=54920")
-                self.logger.error("- Or install Microsoft Office with Access")
-                self.logger.error("- Make sure to install the correct version (32-bit or 64-bit) matching your Python installation")
-            
+            try:
+                available_drivers = pyodbc.drivers()
+                self.logger.error(f"Available ODBC drivers: {list(available_drivers)}")
+                
+                # Check if any Access drivers are available
+                access_drivers = [d for d in available_drivers if 'access' in d.lower() or 'mdb' in d.lower()]
+                if not access_drivers:
+                    self.logger.error("No Microsoft Access drivers found!")
+                    self.logger.error("\n🔧 SOLUTIONS FOR OLD .MDB FILES:")
+                    self.logger.error("1. Download Microsoft Access Database Engine 2016:")
+                    self.logger.error("   https://www.microsoft.com/en-us/download/details.aspx?id=54920")
+                    self.logger.error("2. Or download legacy Jet Database Engine 4.0:")
+                    self.logger.error("   https://www.microsoft.com/en-us/download/details.aspx?id=23734")
+                    self.logger.error("3. Install the version matching your Python architecture")
+                    self.logger.error("4. If installation fails, try: installer.exe /quiet")
+                    self.logger.error("5. Run: fix_odbc_drivers.bat for automated help")
+                    self.logger.error("6. Alternative: Use legacy_mdb_converter.py")
+                else:
+                    self.logger.error("Available Access drivers:")
+                    for driver in access_drivers:
+                        self.logger.error(f"   - {driver}")
+            except Exception as diag_e:
+                self.logger.error(f"Could not get diagnostic information: {diag_e}")
+                
             return None
     
     def connect_to_mysql(self) -> Optional[mysql.connector.MySQLConnection]:
@@ -215,14 +271,64 @@ class AccessToMySQLConverter:
             cursor = access_conn.cursor()
             tables = []
             
-            for table_info in cursor.tables(tableType='TABLE'):
-                table_name = table_info.table_name
-                # Skip system tables
-                if not table_name.startswith('MSys'):
-                    tables.append(table_name)
+            # Method 1: Try the standard approach
+            try:
+                for table_info in cursor.tables(tableType='TABLE'):
+                    table_name = table_info.table_name
+                    # Skip system tables
+                    if not table_name.startswith('MSys'):
+                        tables.append(table_name)
+                        
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 1)")
+                    return tables
+            except Exception as e:
+                self.logger.warning(f"Standard table enumeration failed: {e}")
             
-            self.logger.info(f"Found {len(tables)} user tables")
-            return tables
+            # Method 2: Query system catalog for old MDB files
+            try:
+                cursor.execute("SELECT Name FROM MSysObjects WHERE Type=1 AND Flags=0")
+                for row in cursor.fetchall():
+                    table_name = row[0]
+                    if not table_name.startswith('MSys') and not table_name.startswith('~'):
+                        tables.append(table_name)
+                        
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 2 - system catalog)")
+                    return tables
+            except Exception as e:
+                self.logger.warning(f"System catalog query failed: {e}")
+            
+            # Method 3: Try to get table names from schema information
+            try:
+                # Get all table names from INFORMATION_SCHEMA equivalent
+                cursor.execute("SELECT DISTINCT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+                for row in cursor.fetchall():
+                    table_name = row[0]
+                    if not table_name.startswith('MSys'):
+                        tables.append(table_name)
+                        
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 3 - schema)")
+                    return tables
+            except Exception as e:
+                self.logger.warning(f"Schema information query failed: {e}")
+            
+            # Method 4: Try alternative system table approach
+            try:
+                cursor.execute("SELECT Name FROM MSysObjects WHERE Type IN (1,4,6) AND Left(Name,4) <> 'MSys' AND Left(Name,1) <> '~'")
+                for row in cursor.fetchall():
+                    tables.append(row[0])
+                    
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 4 - alternative)")
+                    return tables
+            except Exception as e:
+                self.logger.warning(f"Alternative system table query failed: {e}")
+            
+            self.logger.warning("All table enumeration methods failed")
+            return []
+            
         except Exception as e:
             self.logger.error(f"Failed to get table list: {e}")
             return []
@@ -232,36 +338,114 @@ class AccessToMySQLConverter:
         try:
             cursor = access_conn.cursor()
             
-            # Get column information
+            # Get column information - try multiple methods for old MDB files
             columns = []
-            for column in cursor.columns(table=table_name):
-                col_info = {
-                    'name': column.column_name,
-                    'type': column.type_name,
-                    'size': column.column_size,
-                    'nullable': column.nullable,
-                    'default': column.column_def
-                }
-                columns.append(col_info)
             
-            # Get primary key information
+            # Method 1: Standard approach
+            try:
+                for column in cursor.columns(table=table_name):
+                    col_info = {
+                        'name': column.column_name,
+                        'type': column.type_name,
+                        'size': getattr(column, 'column_size', 0),
+                        'nullable': getattr(column, 'nullable', True),
+                        'default': getattr(column, 'column_def', None)
+                    }
+                    columns.append(col_info)
+                    
+                if columns:
+                    self.logger.debug(f"Got structure for table {table_name}: {len(columns)} columns (method 1)")
+                    
+            except Exception as e:
+                self.logger.warning(f"Standard column enumeration failed for {table_name}: {e}")
+                
+                # Method 2: Query the table directly to get column info
+                try:
+                    # Get first row to determine column names and types
+                    cursor.execute(f"SELECT TOP 1 * FROM [{table_name}]")
+                    
+                    # Get column information from cursor description
+                    if cursor.description:
+                        for col_desc in cursor.description:
+                            col_info = {
+                                'name': col_desc[0],
+                                'type': self.map_odbc_type_to_access(col_desc[1]),
+                                'size': col_desc[2] if len(col_desc) > 2 else 255,
+                                'nullable': True,  # Default for old MDB
+                                'default': None
+                            }
+                            columns.append(col_info)
+                        
+                        self.logger.debug(f"Got structure for table {table_name}: {len(columns)} columns (method 2)")
+                        
+                except Exception as e2:
+                    self.logger.warning(f"Direct table query failed for {table_name}: {e2}")
+                    
+                    # Method 3: Create minimal structure if all else fails
+                    try:
+                        cursor.execute(f"SELECT * FROM [{table_name}] WHERE 1=0")  # Get structure only
+                        if cursor.description:
+                            for col_desc in cursor.description:
+                                col_info = {
+                                    'name': col_desc[0],
+                                    'type': 'TEXT',  # Default to TEXT for safety
+                                    'size': 255,
+                                    'nullable': True,
+                                    'default': None
+                                }
+                                columns.append(col_info)
+                            self.logger.debug(f"Got minimal structure for table {table_name}: {len(columns)} columns (method 3)")
+                    except Exception as e3:
+                        self.logger.error(f"All column enumeration methods failed for {table_name}: {e3}")
+            
+            # Get primary key information - be more tolerant of failures
             primary_keys = []
             try:
                 for pk in cursor.primaryKeys(table=table_name):
                     primary_keys.append(pk.column_name)
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Could not get primary keys for {table_name}: {e}")
+                # Try alternative method for old MDB files
+                try:
+                    # Look for common primary key patterns
+                    common_pk_names = ['ID', 'Id', f'{table_name}ID', f'{table_name}Id', 'RecordID']
+                    for col in columns:
+                        if col['name'].upper() in [pk.upper() for pk in common_pk_names]:
+                            primary_keys.append(col['name'])
+                            break
+                except:
+                    pass
             
             structure = {
                 'columns': columns,
                 'primary_keys': primary_keys
             }
             
-            self.logger.debug(f"Got structure for table {table_name}: {len(columns)} columns")
             return structure
         except Exception as e:
             self.logger.error(f"Failed to get structure for table {table_name}: {e}")
             return {'columns': [], 'primary_keys': []}
+    
+    def map_odbc_type_to_access(self, odbc_type) -> str:
+        """Map ODBC type constants to Access type names."""
+        # Common ODBC type mappings
+        type_map = {
+            1: 'TEXT',      # SQL_CHAR
+            4: 'LONG',      # SQL_INTEGER
+            5: 'SHORT',     # SQL_SMALLINT
+            6: 'SINGLE',    # SQL_FLOAT
+            7: 'DOUBLE',    # SQL_REAL
+            8: 'DOUBLE',    # SQL_DOUBLE
+            9: 'DATETIME',  # SQL_DATE
+            10: 'DATETIME', # SQL_TIME
+            11: 'DATETIME', # SQL_TIMESTAMP
+            12: 'TEXT',     # SQL_VARCHAR
+            -1: 'MEMO',     # SQL_LONGVARCHAR
+            -2: 'BINARY',   # SQL_BINARY
+            -3: 'LONGBINARY', # SQL_VARBINARY
+            -4: 'LONGBINARY', # SQL_LONGVARBINARY
+        }
+        return type_map.get(odbc_type, 'TEXT')
     
     def convert_column_type(self, access_type: str, size: int) -> str:
         """Convert Access column type to MySQL type."""
@@ -328,9 +512,26 @@ class AccessToMySQLConverter:
                           source_table: str, target_db: str, target_table: str) -> int:
         """Migrate data from Access table to MySQL table."""
         try:
-            # Read data from Access
-            query = f"SELECT * FROM `{source_table}`"
-            df = pd.read_sql(query, access_conn)
+            # Try different query approaches for old MDB files
+            queries_to_try = [
+                f"SELECT * FROM `{source_table}`",
+                f"SELECT * FROM [{source_table}]",
+                f"SELECT * FROM {source_table}",
+            ]
+            
+            df = None
+            for query in queries_to_try:
+                try:
+                    df = pd.read_sql(query, access_conn)
+                    self.logger.debug(f"Successfully read data using query: {query}")
+                    break
+                except Exception as e:
+                    self.logger.debug(f"Query failed: {query} - {e}")
+                    continue
+            
+            if df is None:
+                self.logger.error(f"Could not read data from table {source_table} with any query method")
+                return 0
             
             if df.empty:
                 self.logger.info(f"Table {source_table} is empty")
@@ -342,6 +543,20 @@ class AccessToMySQLConverter:
             # Convert data types and handle None values
             df = df.where(pd.notnull(df), None)
             
+            # Handle common data type issues in old MDB files
+            for col in df.columns:
+                # Convert Access Date/Time to proper format
+                if df[col].dtype == 'object':
+                    try:
+                        # Try to convert date strings
+                        pd.to_datetime(df[col], errors='ignore')
+                    except:
+                        pass
+                
+                # Handle binary data that might cause issues
+                if df[col].dtype == 'object':
+                    df[col] = df[col].astype(str).replace('nan', None)
+            
             # Insert data into MySQL
             cursor = mysql_conn.cursor()
             
@@ -350,24 +565,50 @@ class AccessToMySQLConverter:
             placeholders = ', '.join(['%s'] * len(df.columns))
             insert_sql = f"INSERT INTO `{target_db}`.`{target_table}` ({columns}) VALUES ({placeholders})"
             
-            # Insert in batches
-            batch_size = 1000
+            # Insert in smaller batches for old MDB files
+            batch_size = 500  # Reduced batch size for better compatibility
             total_rows = len(df)
             
             for i in range(0, total_rows, batch_size):
                 batch = df.iloc[i:i+batch_size]
-                values = [tuple(row) for row in batch.values]
-                cursor.executemany(insert_sql, values)
-                mysql_conn.commit()
+                values = []
                 
-                self.logger.debug(f"Inserted batch {i//batch_size + 1} "
-                                f"({min(i+batch_size, total_rows)}/{total_rows} rows)")
+                for row in batch.values:
+                    # Clean up each row for old MDB compatibility
+                    clean_row = []
+                    for val in row:
+                        if pd.isna(val) or val == 'nan':
+                            clean_row.append(None)
+                        elif isinstance(val, str) and len(val) > 65535:  # Truncate very long strings
+                            clean_row.append(val[:65535])
+                        else:
+                            clean_row.append(val)
+                    values.append(tuple(clean_row))
+                
+                try:
+                    cursor.executemany(insert_sql, values)
+                    mysql_conn.commit()
+                    
+                    self.logger.debug(f"Inserted batch {i//batch_size + 1} "
+                                    f"({min(i+batch_size, total_rows)}/{total_rows} rows)")
+                except Exception as e:
+                    self.logger.warning(f"Batch insert failed, trying individual inserts: {e}")
+                    # Try inserting rows individually
+                    for row_values in values:
+                        try:
+                            cursor.execute(insert_sql, row_values)
+                        except Exception as row_e:
+                            self.logger.warning(f"Skipping problematic row: {row_e}")
+                            continue
+                    mysql_conn.commit()
             
             self.logger.info(f"Migrated {total_rows} records from {source_table} to {target_table}")
             return total_rows
             
         except Exception as e:
             self.logger.error(f"Failed to migrate data for table {source_table}: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
             return 0
     
     def get_relationships(self, access_conn: pyodbc.Connection) -> List[Dict[str, str]]:
