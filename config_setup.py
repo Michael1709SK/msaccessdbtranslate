@@ -202,7 +202,7 @@ class ConverterConfig:
             return {}
     
     def test_connections(self):
-        """Test MySQL connection."""
+        """Test MySQL connection and ODBC drivers."""
         print("\n" + "=" * 40)
         print("Testing Connections")
         print("=" * 40)
@@ -221,13 +221,25 @@ class ConverterConfig:
         
         # Test Access driver availability
         try:
-            drivers = [x for x in pyodbc.drivers() if 'Access' in x or 'Microsoft Access Driver' in x]
-            if drivers:
-                print(f"✅ MS Access drivers available: {drivers}")
+            drivers = pyodbc.drivers()
+            access_drivers = [x for x in drivers if 'access' in x.lower() or 'mdb' in x.lower() or 'accdb' in x.lower()]
+            
+            if access_drivers:
+                print(f"✅ MS Access drivers available:")
+                for driver in access_drivers:
+                    print(f"   - {driver}")
             else:
-                print("⚠️  No MS Access drivers found. You may need to install Microsoft Access Database Engine.")
+                print("❌ No MS Access drivers found!")
+                print("\n🔧 To fix this issue:")
+                print("   1. Download Microsoft Access Database Engine 2016:")
+                print("      https://www.microsoft.com/en-us/download/details.aspx?id=54920")
+                print("   2. Install the version matching your Python architecture")
+                print("   3. If installation fails, try running with /quiet parameter")
+                print("   4. Run 'python diagnose_odbc.py' for detailed diagnostics")
+                
         except Exception as e:
             print(f"❌ Error checking Access drivers: {e}")
+            print("Run 'python diagnose_odbc.py' for detailed diagnostics")
     
     def display_current_config(self):
         """Display current configuration."""

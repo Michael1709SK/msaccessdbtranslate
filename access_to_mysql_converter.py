@@ -134,8 +134,44 @@ class AccessToMySQLConverter:
     
     def get_access_connection_string(self, db_path: Path) -> str:
         """Generate connection string for MS Access database."""
-        driver = "Microsoft Access Driver (*.mdb, *.accdb)"
-        return f"DRIVER={{{driver}}};DBQ={str(db_path.absolute())};ExtendedAnsiSQL=1;"
+        # Try multiple driver names in order of preference for old MDB files
+        possible_drivers = [
+            "Microsoft Access Driver (*.mdb, *.accdb)",  # Modern driver
+            "Microsoft Access Driver (*.mdb)",           # Legacy MDB-only driver
+            "Microsoft Office Access Driver (*.mdb, *.accdb)",
+            "Driver do Microsoft Access (*.mdb)",        # Localized versions
+            "Microsoft dBase Driver (*.dbf)",            # Sometimes works as fallback
+        ]
+        
+        available_drivers = [x for x in pyodbc.drivers()]
+        self.logger.debug(f"Available ODBC drivers: {available_drivers}")
+        
+        # Find the first available driver
+        for driver in possible_drivers:
+            if driver in available_drivers:
+                self.logger.info(f"Using ODBC driver: {driver}")
+                # For old MDB files, use simpler connection string
+                if db_path.suffix.lower() == '.mdb':
+                    return f"DRIVER={{{driver}}};DBQ={str(db_path.absolute())};ReadOnly=0;"
+                else:
+                    return f"DRIVER={{{driver}}};DBQ={str(db_path.absolute())};ExtendedAnsiSQL=1;"
+        
+        # If no specific Access driver found, try generic ones
+        for driver in available_drivers:
+            if "access" in driver.lower() or "mdb" in driver.lower() or "accdb" in driver.lower():
+                self.logger.info(f"Using fallback ODBC driver: {driver}")
+                return f"DRIVER={{{driver}}};DBQ={str(db_path.absolute())};ReadOnly=0;"
+        
+        # No suitable driver found - provide specific help for old MDB files
+        raise Exception(f"No Microsoft Access ODBC driver found for .mdb files.\n"
+                       f"Available drivers: {available_drivers}\n\n"
+                       f"🔧 SOLUTION FOR OLD .MDB FILES:\n"
+                       f"1. Download Microsoft Access Database Engine 2016:\n"
+                       f"   https://www.microsoft.com/en-us/download/details.aspx?id=54920\n"
+                       f"2. Choose the version matching your Python architecture\n"
+                       f"3. Or try the legacy Jet Database Engine:\n"
+                       f"   https://www.microsoft.com/en-us/download/details.aspx?id=23734\n"
+                       f"4. Run: fix_odbc_drivers.bat for automated help")
     
     def connect_to_access(self, db_path: Path) -> Optional[pyodbc.Connection]:
         """Connect to MS Access database."""
@@ -146,6 +182,21 @@ class AccessToMySQLConverter:
             return conn
         except Exception as e:
             self.logger.error(f"Failed to connect to {db_path}: {e}")
+            
+            # Log additional troubleshooting information
+            self.logger.error("Troubleshooting information:")
+            available_drivers = pyodbc.drivers()
+            self.logger.error(f"Available ODBC drivers: {list(available_drivers)}")
+            
+            # Check if any Access drivers are available
+            access_drivers = [d for d in available_drivers if 'access' in d.lower() or 'mdb' in d.lower()]
+            if not access_drivers:
+                self.logger.error("No Microsoft Access drivers found!")
+                self.logger.error("Please install Microsoft Access Database Engine:")
+                self.logger.error("- Download from: https://www.microsoft.com/en-us/download/details.aspx?id=54920")
+                self.logger.error("- Or install Microsoft Office with Access")
+                self.logger.error("- Make sure to install the correct version (32-bit or 64-bit) matching your Python installation")
+            
             return None
     
     def connect_to_mysql(self) -> Optional[mysql.connector.MySQLConnection]:

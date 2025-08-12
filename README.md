@@ -84,8 +84,11 @@ python access_to_mysql_converter.py "C:\path\to\access\databases" --user myuser 
 ### Basic Usage
 
 ```bash
-# Convert all databases in a directory
+# For modern Access databases (.accdb)
 python access_to_mysql_converter.py "C:\databases" --user root --password secret
+
+# For OLD .MDB files (like yours)
+python legacy_mdb_converter.py "C:\databases" --user root --password secret
 
 # Specify custom MySQL host and port
 python access_to_mysql_converter.py "C:\databases" --host 192.168.1.100 --port 3306 --user dbuser --password dbpass
@@ -114,8 +117,13 @@ msaccess-script/
 ├── access_to_mysql_converter.py    # Main conversion engine
 ├── config_setup.py                 # Interactive configuration setup
 ├── run_converter.py                # Convenient runner script
+├── diagnose_odbc.py                # ODBC diagnostics and troubleshooting
+├── fix_odbc_drivers.bat            # Windows ODBC driver fix script
 ├── requirements.txt                # Python dependencies
 ├── README.md                       # This file
+├── install.bat                     # Windows installation script
+├── run_conversion.bat              # Windows quick start script
+├── example_usage.py                # Sample programmatic usage
 ├── logs/                           # Generated log files
 │   ├── access_to_mysql_YYYYMMDD_HHMMSS.log
 │   └── conversion_report_YYYYMMDD_HHMMSS.json
@@ -200,21 +208,47 @@ The converter is designed to be resilient:
 
 ### Common Issues
 
-1. **"Microsoft Access Driver not found"**
+1. **"Data source name not found and no default driver specified" (ODBC Error)**
+   
+   **Cause**: Microsoft Access ODBC driver is not installed or not compatible with your Python architecture.
+   
+   **For OLD .MDB FILES (your case):**
+   ```bash
+   # Quick fix script
+   fix_odbc_drivers.bat
+   
+   # Or use the legacy converter
+   python legacy_mdb_converter.py "C:\path\to\old\mdb\files" --user myuser --password mypass
+   ```
+   
+   **Manual Fix for Old MDB Files**:
+   - Download Microsoft Access Database Engine 2016 Redistributable:
+     https://www.microsoft.com/en-us/download/details.aspx?id=54920
+   - **For 64-bit Python**: Install AccessDatabaseEngine_X64.exe
+   - **For 32-bit Python**: Install AccessDatabaseEngine.exe
+   - If you get "Another version is already installed" error:
+     - Run as Administrator: `AccessDatabaseEngine_X64.exe /quiet` (or AccessDatabaseEngine.exe /quiet)
+   
+   **Alternative for Very Old MDB Files**:
+   - Download legacy Jet Database Engine 4.0:
+     https://www.microsoft.com/en-us/download/details.aspx?id=23734
+   - Use the `legacy_mdb_converter.py` script which tries multiple methods
+
+2. **"Microsoft Access Driver not found"**
    - Install Microsoft Access Database Engine 2016 Redistributable
    - Ensure 32-bit Python with 32-bit driver or 64-bit Python with 64-bit driver
 
-2. **"Permission denied" errors**
+3. **"Permission denied" errors**
    - Ensure Access databases are not open in Microsoft Access
    - Check file permissions
    - Run with administrator privileges if needed
 
-3. **MySQL connection errors**
+4. **MySQL connection errors**
    - Verify MySQL server is running
    - Check firewall settings
    - Confirm username/password and permissions
 
-4. **Memory errors with large databases**
+5. **Memory errors with large databases**
    - Reduce batch size in configuration
    - Ensure sufficient system RAM
    - Close other applications
