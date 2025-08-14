@@ -138,16 +138,90 @@ class AccessCOMConverter:
             self.logger.info(f"Opening database: {db_path.name}")
             self.access_app.OpenCurrentDatabase(str(db_path.absolute()))
             
-            # Get all table names
+            # Method 1: Try CurrentData.AllTables (modern approach)
             tables = []
-            for table in self.access_app.CurrentData.AllTables:
-                table_name = table.Name
-                # Skip system tables
-                if not table_name.startswith("MSys") and not table_name.startswith("~"):
-                    tables.append(table_name)
+            try:
+                for table in self.access_app.CurrentData.AllTables:
+                    table_name = table.Name
+                    # Skip system tables
+                    if not table_name.startswith("MSys") and not table_name.startswith("~"):
+                        tables.append(table_name)
+                        
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 1): {tables}")
+                    return tables
+            except Exception as e:
+                self.logger.warning(f"AllTables method failed: {e}")
             
-            self.logger.info(f"Found {len(tables)} user tables: {tables}")
-            return tables
+            # Method 2: Try using DAO (Database Access Objects) for old MDB files
+            try:
+                db = self.access_app.CurrentDb()
+                tabledefs = db.TableDefs
+                
+                for i in range(tabledefs.Count):
+                    tabledef = tabledefs.Item(i)
+                    table_name = tabledef.Name
+                    
+                    # Skip system tables and temp tables
+                    if (not table_name.startswith("MSys") and 
+                        not table_name.startswith("~") and
+                        not table_name.startswith("TEMP")):
+                        
+                        # Check if it's a user table (not a system table)
+                        table_type = getattr(tabledef, 'Attributes', 0)
+                        if table_type & 2 == 0:  # Not a system table
+                            tables.append(table_name)
+                
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 2 - DAO): {tables}")
+                    return tables
+                    
+            except Exception as e:
+                self.logger.warning(f"DAO method failed: {e}")
+            
+            # Method 3: Use SQL to query system tables
+            try:
+                rs = self.access_app.CurrentDb().OpenRecordset(
+                    "SELECT Name FROM MSysObjects WHERE Type=1 AND Flags=0 AND Left([Name],4)<>'MSys' AND Left([Name],1)<>'~'"
+                )
+                
+                while not rs.EOF:
+                    table_name = rs.Fields("Name").Value
+                    tables.append(table_name)
+                    rs.MoveNext()
+                    
+                rs.Close()
+                
+                if tables:
+                    self.logger.info(f"Found {len(tables)} user tables (method 3 - SQL): {tables}")
+                    return tables
+                    
+            except Exception as e:
+                self.logger.warning(f"SQL method failed: {e}")
+            
+            # Method 4: Manual table detection by trying to open recordsets
+            try:
+                # Try common table names or enumerate through possible names
+                potential_tables = ["Table1", "Data", "Main", "Records", "Items", "Customers", "Orders", "Products"]
+                
+                for potential_name in potential_tables:
+                    try:
+                        rs = self.access_app.CurrentDb().OpenRecordset(f"SELECT TOP 1 * FROM [{potential_name}]")
+                        rs.Close()
+                        tables.append(potential_name)
+                        self.logger.info(f"Found table by testing: {potential_name}")
+                    except:
+                        continue
+                        
+                if tables:
+                    self.logger.info(f"Found {len(tables)} tables by testing common names")
+                    return tables
+                    
+            except Exception as e:
+                self.logger.warning(f"Manual detection failed: {e}")
+            
+            self.logger.error("All table enumeration methods failed")
+            return []
             
         except Exception as e:
             self.logger.error(f"Failed to get table list from {db_path}: {e}")
@@ -156,24 +230,143 @@ class AccessCOMConverter:
     def export_table_to_csv(self, table_name: str, temp_dir: Path) -> Optional[Path]:
         """Export Access table to CSV file."""
         try:
-            csv_file = temp_dir / f"{table_name}.csv"
+            csv_file = temp_dir / f"{self.sanitize_name(table_name)}.csv"
             
             self.logger.debug(f"Exporting {table_name} to CSV...")
             
-            # Use Access DoCmd.TransferText to export as CSV
-            self.access_app.DoCmd.TransferText(
-                TransferType=2,  # acExportDelim (CSV export)
-                TableName=table_name,
-                FileName=str(csv_file.absolute()),
-                HasFieldNames=True
-            )
+            # Method 1: Use DoCmd.TransferText (standard method)
+            try:
+                self.access_app.DoCmd.TransferText(
+                    TransferType=2,  # acExportDelim (CSV export)
+                    TableName=table_name,
+                    FileName=str(csv_file.absolute()),
+                    HasFieldNames=True
+                )
+                
+                if csv_file.exists() and csv_file.stat().st_size > 0:
+                    self.logger.debug(f"✅ Exported {table_name} to {csv_file.name} (method 1)")
+                    return csv_file
+                    
+            except Exception as e:
+                self.logger.warning(f"DoCmd.TransferText failed for {table_name}: {e}")
             
-            if csv_file.exists() and csv_file.stat().st_size > 0:
-                self.logger.debug(f"✅ Exported {table_name} to {csv_file.name}")
-                return csv_file
-            else:
-                self.logger.warning(f"⚠️  Export of {table_name} resulted in empty file")
-                return None
+            # Method 2: Use DoCmd.OutputTo (alternative export method)
+            try:
+                self.access_app.DoCmd.OutputTo(
+                    ObjectType=0,  # acOutputTable
+                    ObjectName=table_name,
+                    OutputFormat="Microsoft Excel (*.xls)",  # Try Excel first
+                    OutputFile=str(temp_dir / f"{self.sanitize_name(table_name)}.xls"),
+                    AutoStart=False
+                )
+                
+                # Convert XLS to CSV using pandas
+                xls_file = temp_dir / f"{self.sanitize_name(table_name)}.xls"
+                if xls_file.exists():
+                    import pandas as pd
+                    df = pd.read_excel(xls_file)
+                    df.to_csv(csv_file, index=False)
+                    xls_file.unlink()  # Delete temporary XLS file
+                    
+                    if csv_file.exists() and csv_file.stat().st_size > 0:
+                        self.logger.debug(f"✅ Exported {table_name} via Excel conversion (method 2)")
+                        return csv_file
+                        
+            except Exception as e:
+                self.logger.warning(f"OutputTo method failed for {table_name}: {e}")
+            
+            # Method 3: Direct recordset export for old MDB files
+            try:
+                db = self.access_app.CurrentDb()
+                
+                # Try different SQL variations to access the table
+                sql_variations = [
+                    f"SELECT * FROM [{table_name}]",
+                    f"SELECT * FROM `{table_name}`",
+                    f"SELECT * FROM {table_name}",
+                    f"SELECT * FROM [{table_name.replace(' ', '_')}]"  # Replace spaces
+                ]
+                
+                rs = None
+                for sql in sql_variations:
+                    try:
+                        rs = db.OpenRecordset(sql)
+                        self.logger.debug(f"Successful SQL: {sql}")
+                        break
+                    except Exception as sql_e:
+                        self.logger.debug(f"SQL failed: {sql} - {sql_e}")
+                        continue
+                
+                if rs is None:
+                    raise Exception("Could not open recordset with any SQL variation")
+                
+                # Export recordset to CSV manually
+                with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                    import csv
+                    writer = csv.writer(f)
+                    
+                    # Write headers
+                    field_names = [field.Name for field in rs.Fields]
+                    writer.writerow(field_names)
+                    
+                    # Write data
+                    row_count = 0
+                    while not rs.EOF and row_count < 100000:  # Limit for safety
+                        row_data = []
+                        for field in rs.Fields:
+                            value = field.Value
+                            if value is None:
+                                row_data.append('')
+                            else:
+                                row_data.append(str(value))
+                        writer.writerow(row_data)
+                        rs.MoveNext()
+                        row_count += 1
+                    
+                    if row_count >= 100000:
+                        self.logger.warning(f"Table {table_name} truncated at 100,000 rows for safety")
+                
+                rs.Close()
+                
+                if csv_file.exists() and csv_file.stat().st_size > 0:
+                    self.logger.debug(f"✅ Exported {table_name} via recordset (method 3) - {row_count} rows")
+                    return csv_file
+                    
+            except Exception as e:
+                self.logger.warning(f"Recordset export failed for {table_name}: {e}")
+            
+            # Method 4: Try with quoted table name variations
+            try:
+                quoted_variations = [
+                    f'"{table_name}"',
+                    f"'{table_name}'",
+                    f"[{table_name}]",
+                    f"`{table_name}`"
+                ]
+                
+                for quoted_name in quoted_variations:
+                    try:
+                        self.access_app.DoCmd.TransferText(
+                            TransferType=2,  # acExportDelim
+                            TableName=quoted_name,
+                            FileName=str(csv_file.absolute()),
+                            HasFieldNames=True
+                        )
+                        
+                        if csv_file.exists() and csv_file.stat().st_size > 0:
+                            self.logger.debug(f"✅ Exported {table_name} with quoting: {quoted_name}")
+                            return csv_file
+                            
+                    except Exception as quote_e:
+                        self.logger.debug(f"Quoted name {quoted_name} failed: {quote_e}")
+                        continue
+                        
+            except Exception as e:
+                self.logger.warning(f"Quoted name variations failed: {e}")
+            
+            # If all methods failed
+            self.logger.error(f"All export methods failed for table: {table_name}")
+            return None
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to export {table_name}: {e}")
@@ -301,11 +494,52 @@ class AccessCOMConverter:
         self.logger.info(f"Starting conversion of {db_path.name} -> {db_name}")
         
         try:
-            # Get table list
+            # First, test if we can open the database at all
+            try:
+                self.access_app.OpenCurrentDatabase(str(db_path.absolute()))
+                self.logger.info(f"✅ Successfully opened database: {db_path.name}")
+            except Exception as open_e:
+                self.logger.error(f"❌ Cannot open database {db_path.name}: {open_e}")
+                return False
+            
+            # Get table list with detailed debugging
+            self.logger.info("Attempting to enumerate tables...")
             tables = self.get_table_list(db_path)
+            
             if not tables:
                 self.logger.warning(f"No tables found in {db_path.name}")
-                return True
+                
+                # Try to get ANY objects from the database for debugging
+                try:
+                    self.logger.info("Debugging: Attempting to list ALL objects...")
+                    
+                    # Try to get all objects including system tables
+                    db = self.access_app.CurrentDb()
+                    tabledefs = db.TableDefs
+                    
+                    all_objects = []
+                    for i in range(tabledefs.Count):
+                        tabledef = tabledefs.Item(i)
+                        all_objects.append(f"{tabledef.Name} (Type: {getattr(tabledef, 'Attributes', 'unknown')})")
+                    
+                    self.logger.info(f"All objects in database: {all_objects}")
+                    
+                    if all_objects:
+                        self.logger.warning("Database has objects but no user tables were identified")
+                        
+                        # Try to export the first non-system table we can find
+                        for obj_info in all_objects:
+                            obj_name = obj_info.split(' (')[0]
+                            if not obj_name.startswith('MSys') and not obj_name.startswith('~'):
+                                tables = [obj_name]
+                                self.logger.info(f"Will attempt to process: {obj_name}")
+                                break
+                    
+                except Exception as debug_e:
+                    self.logger.error(f"Debug enumeration failed: {debug_e}")
+                    
+                if not tables:
+                    return True  # Consider empty database as successful
             
             # Create temporary directory for CSV exports
             temp_dir = Path(tempfile.mkdtemp(prefix="access_export_"))
@@ -318,11 +552,21 @@ class AccessCOMConverter:
             for table_name in tables:
                 try:
                     sanitized_table_name = self.sanitize_name(table_name)
-                    self.logger.info(f"Converting table: {table_name} -> {sanitized_table_name}")
+                    self.logger.info(f"Converting table: '{table_name}' -> '{sanitized_table_name}'")
+                    
+                    # Try to get basic info about the table first
+                    try:
+                        rs = self.access_app.CurrentDb().OpenRecordset(f"SELECT TOP 1 * FROM [{table_name}]")
+                        field_count = rs.Fields.Count
+                        rs.Close()
+                        self.logger.debug(f"Table {table_name} has {field_count} fields")
+                    except Exception as info_e:
+                        self.logger.warning(f"Could not get table info for {table_name}: {info_e}")
                     
                     # Export to CSV
                     csv_file = self.export_table_to_csv(table_name, temp_dir)
                     if not csv_file:
+                        self.logger.error(f"Failed to export table: {table_name}")
                         self.stats['tables_failed'] += 1
                         continue
                     
@@ -332,8 +576,10 @@ class AccessCOMConverter:
                         converted_tables += 1
                         total_records += records
                         self.stats['tables_converted'] += 1
+                        self.logger.info(f"✅ Successfully converted {table_name}: {records} records")
                     else:
                         self.stats['tables_failed'] += 1
+                        self.logger.warning(f"⚠️ Table {table_name} conversion had no records")
                     
                     # Clean up CSV file
                     try:
@@ -343,6 +589,8 @@ class AccessCOMConverter:
                         
                 except Exception as e:
                     self.logger.error(f"Failed to convert table {table_name}: {e}")
+                    import traceback
+                    self.logger.debug(traceback.format_exc())
                     self.stats['tables_failed'] += 1
                     continue
             
@@ -361,6 +609,8 @@ class AccessCOMConverter:
             
         except Exception as e:
             self.logger.error(f"Database conversion failed: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
             return False
         finally:
             # Close the database
