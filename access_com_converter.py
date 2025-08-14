@@ -319,6 +319,120 @@ class AccessCOMConverter:
         # Access application object
         self.access_app = None
     
+    def safe_close_database(self):
+        """Safely close the current Access database."""
+        try:
+            if self.access_app:
+                # Close current database
+                self.access_app.CloseCurrentDatabase()
+                self.logger.debug("✅ Closed current Access database")
+        except Exception as e:
+            self.logger.debug(f"Database close warning (usually safe to ignore): {e}")
+    
+    def is_database_in_use(self, db_path: Path) -> bool:
+        """Check if database is currently in use (production-safe check)."""
+        try:
+            # Check for lock files
+            lock_extensions = ['.ldb', '.laccdb']
+            
+            for ext in lock_extensions:
+                lock_file = db_path.with_suffix(ext)
+                if lock_file.exists():
+                    # Check if lock file is recent (modified in last 10 minutes)
+                    import time
+                    file_age = time.time() - lock_file.stat().st_mtime
+                    if file_age < 600:  # 10 minutes
+                        self.logger.warning(f"⚠️  Database {db_path.name} may be in use (recent lock file: {lock_file.name})")
+                        return True
+            
+            # Try to open file in exclusive mode briefly (non-destructive test)
+            try:
+                with open(db_path, 'r+b') as f:
+                    # If we can open it, it's likely not in use
+                    pass
+                return False
+            except PermissionError:
+                # File is locked by another process
+                self.logger.warning(f"⚠️  Database {db_path.name} is locked by another process")
+                return True
+                
+        except Exception as e:
+            self.logger.debug(f"Could not check if database is in use: {e}")
+            return False
+        
+        return False
+    
+    def safe_open_database(self, db_path: Path) -> bool:
+        """Safely open an Access database with production-safe checks."""
+        
+        # First, check if database appears to be in use (production safety)
+        if self.is_database_in_use(db_path):
+            self.logger.warning(f"🛡️  Production safety: Database {db_path.name} appears to be in use")
+            
+            # Give user option to continue or skip
+            # In production, we'll log and skip by default
+            self.logger.warning("🛡️  Skipping database to avoid production interference")
+            self.logger.info("💡 To process this database, ensure it's not in use and remove lock files manually")
+            return False
+        
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # Always close any existing database first
+                self.safe_close_database()
+                
+                # Small delay to ensure cleanup (longer in production)
+                import time
+                time.sleep(2 + attempt)  # 2-4 seconds delay
+                
+                # Open the new database
+                self.access_app.OpenCurrentDatabase(str(db_path.absolute()))
+                self.logger.debug(f"✅ Opened database: {db_path.name}")
+                return True
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                if "already" in error_msg or "open" in error_msg or "lock" in error_msg:
+                    self.logger.warning(f"🔒 Database lock detected (attempt {attempt + 1}/{max_retries}): {e}")
+                    
+                    if attempt < max_retries - 1:
+                        self.logger.info(f"🔄 Waiting longer before retry (production-safe approach)...")
+                        
+                        # Production-safe retry logic
+                        try:
+                            # Force close current database
+                            self.safe_close_database()
+                            
+                            # Longer wait in production
+                            time.sleep(5 + attempt * 3)
+                            
+                            # Only restart Access as last resort
+                            if attempt == max_retries - 2:
+                                self.logger.info("🔄 Restarting Access application (last resort)...")
+                                self.close_access()
+                                time.sleep(5)
+                                if not self.start_access():
+                                    return False
+                        except Exception as retry_e:
+                            self.logger.debug(f"Retry cleanup warning: {retry_e}")
+                        
+                        continue
+                    else:
+                        self.logger.error(f"❌ Cannot open database {db_path.name} after {max_retries} attempts")
+                        self.logger.error("🛡️  Production safety: Database may be in active use")
+                        self.logger.error("💡 Consider:")
+                        self.logger.error("   - Running during off-peak hours")
+                        self.logger.error("   - Copying database before conversion")  
+                        self.logger.error("   - Running: check_database_locks_production_safe.bat")
+                        return False
+                else:
+                    self.logger.error(f"❌ Failed to open database {db_path.name}: {e}")
+                    return False
+        
+        return False
+    
     def setup_logging(self):
         """Setup comprehensive logging system."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -358,18 +472,24 @@ class AccessCOMConverter:
             return False
     
     def close_access(self):
-        """Close Microsoft Access application."""
+        """Close Microsoft Access application safely."""
         try:
             if self.access_app:
-                try:
-                    self.access_app.CloseCurrentDatabase()
-                except:
-                    pass
+                # First close any open database
+                self.safe_close_database()
+                
+                # Small delay to ensure cleanup
+                import time
+                time.sleep(0.5)
+                
+                # Quit the Access application
                 self.access_app.Quit()
                 self.access_app = None
-                self.logger.info("Microsoft Access closed")
+                self.logger.info("✅ Microsoft Access closed safely")
         except Exception as e:
-            self.logger.warning(f"Error closing Access: {e}")
+            self.logger.warning(f"Warning during Access cleanup: {e}")
+            # Force cleanup
+            self.access_app = None
     
     def find_access_databases(self) -> List[Path]:
         """Find all MS Access database files in the source directory."""
@@ -1069,11 +1189,7 @@ class AccessCOMConverter:
             # Phase 1: Open and analyze database
             self.stats_tracker.update_phase(f"Analyzing {db_path.name}")
             
-            try:
-                self.access_app.OpenCurrentDatabase(str(db_path.absolute()))
-                self.logger.info(f"✅ Successfully opened database: {db_path.name}")
-            except Exception as open_e:
-                self.logger.error(f"❌ Cannot open database {db_path.name}: {open_e}")
+            if not self.safe_open_database(db_path):
                 self.stats_tracker.complete_database(db_path, success=False)
                 return False
             
@@ -1159,6 +1275,9 @@ class AccessCOMConverter:
             except Exception:
                 pass
             
+            # Always close the database when done
+            self.safe_close_database()
+            
             self.stats_tracker.complete_database(db_path, success=True)
             self.logger.info(f"🎉 Successfully completed conversion of {db_path.name}")
             return True
@@ -1166,6 +1285,8 @@ class AccessCOMConverter:
         except Exception as e:
             self.logger.error(f"❌ Failed to convert database {db_path}: {e}")
             self.stats_tracker.complete_database(db_path, success=False)
+            # Ensure database is closed even on failure
+            self.safe_close_database()
             return False
     
     def _process_single_table(self, table_name: str, estimated_size: int, db_name: str, temp_dir: Path):
@@ -1256,14 +1377,19 @@ class AccessCOMConverter:
             for db_path in databases:
                 # Quick scan to count tables for better progress tracking
                 try:
-                    self.access_app.OpenCurrentDatabase(str(db_path.absolute()))
-                    tables = self.get_table_list(db_path)
-                    table_count = len(tables)
-                    self.stats_tracker.add_database(db_path, table_count)
-                    self.access_app.CloseCurrentDatabase()
+                    if self.safe_open_database(db_path):
+                        tables = self.get_table_list(db_path)
+                        table_count = len(tables)
+                        self.stats_tracker.add_database(db_path, table_count)
+                        self.safe_close_database()
+                    else:
+                        self.logger.warning(f"Could not open {db_path.name} for pre-scan")
+                        self.stats_tracker.add_database(db_path, 0)
                 except Exception as e:
                     self.logger.warning(f"Could not pre-scan {db_path.name}: {e}")
                     self.stats_tracker.add_database(db_path, 0)
+                    # Ensure database is closed even on error
+                    self.safe_close_database()
             
             # Phase 2: Convert databases
             self.stats_tracker.update_phase("Converting databases")
@@ -1282,10 +1408,15 @@ class AccessCOMConverter:
                 except Exception as e:
                     self.logger.error(f"❌ Unexpected error processing {db_path}: {e}")
                     self.stats_tracker.complete_database(db_path, success=False)
+                    # Ensure database is closed even on error
+                    self.safe_close_database()
                     continue
                 
-                # Brief pause between databases to allow progress display
-                time.sleep(1)
+                # Ensure database is closed between processing
+                self.safe_close_database()
+                
+                # Brief pause between databases to allow Access to clean up properly
+                time.sleep(2)
             
             # Final phase
             self.stats_tracker.update_phase("Completing conversion")
